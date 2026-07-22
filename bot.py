@@ -1,338 +1,494 @@
 import os
-import html
+import time
 import requests
 import feedparser
-from datetime import datetime, timezone
 
-from openai import OpenAI
+from datetime import datetime, timezone
+from google import genai
 
 
 # =========================================================
-# تنظیمات
+# CONFIG
 # =========================================================
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
-
-# مدل OpenAI
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# مدل Gemini از GitHub Secret خوانده می‌شود
+# اگر Secret وجود نداشته باشد، مقدار پیش‌فرض استفاده می‌شود
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-2.5-flash"
+)
 
 
 # =========================================================
-# منابع خبری RSS
+# RSS NEWS SOURCES
 # =========================================================
 
 RSS_FEEDS = [
+
     {
-        "name": "Google News - Iran US",
+        "name": "Iran US Conflict",
         "url": (
             "https://news.google.com/rss/search?"
-            "q=Iran+United+States+war+OR+conflict"
+            "q=Iran+United+States+conflict"
             "&hl=en-US&gl=US&ceid=US:en"
-        ),
+        )
     },
 
     {
-        "name": "Google News - Iran",
+        "name": "Iran Military",
         "url": (
             "https://news.google.com/rss/search?"
-            "q=Iran+military+OR+Iran+crisis"
+            "q=Iran+military+attack"
             "&hl=en-US&gl=US&ceid=US:en"
-        ),
+        )
     },
 
     {
-        "name": "Google News - Strait of Hormuz",
+        "name": "US Iran",
+        "url": (
+            "https://news.google.com/rss/search?"
+            "q=US+Iran+war"
+            "&hl=en-US&gl=US&ceid=US:en"
+        )
+    },
+
+    {
+        "name": "Strait of Hormuz",
         "url": (
             "https://news.google.com/rss/search?"
             "q=Strait+of+Hormuz"
             "&hl=en-US&gl=US&ceid=US:en"
-        ),
+        )
     },
 
     {
-        "name": "Google News - Iran Diplomacy",
+        "name": "Iran Diplomacy",
         "url": (
             "https://news.google.com/rss/search?"
-            "q=Iran+US+diplomacy+negotiations"
+            "q=Iran+US+negotiations+diplomacy"
             "&hl=en-US&gl=US&ceid=US:en"
-        ),
+        )
     },
 
     {
-        "name": "Google News - Oil",
+        "name": "Oil Market",
         "url": (
             "https://news.google.com/rss/search?"
             "q=Iran+oil+price+Middle+East"
             "&hl=en-US&gl=US&ceid=US:en"
-        ),
-    },
+        )
+    }
+
 ]
 
 
 # =========================================================
-# دریافت اخبار
+# FETCH NEWS
 # =========================================================
 
 def fetch_news():
 
     all_news = []
 
+    print("Collecting news...")
+
     for feed_info in RSS_FEEDS:
 
         try:
 
-            feed = feedparser.parse(feed_info["url"])
+            feed = feedparser.parse(
+                feed_info["url"]
+            )
+
+            print(
+                f"{feed_info['name']}: "
+                f"{len(feed.entries)} items"
+            )
 
             for entry in feed.entries[:10]:
 
-                title = entry.get("title", "").strip()
-                link = entry.get("link", "").strip()
-                published = entry.get("published", "")
+                title = entry.get(
+                    "title",
+                    ""
+                ).strip()
+
+                link = entry.get(
+                    "link",
+                    ""
+                ).strip()
+
+                published = entry.get(
+                    "published",
+                    ""
+                )
 
                 if not title:
                     continue
 
                 all_news.append(
                     {
-                        "source": feed_info["name"],
-                        "title": title,
-                        "link": link,
-                        "published": published,
+                        "source":
+                            feed_info["name"],
+
+                        "title":
+                            title,
+
+                        "link":
+                            link,
+
+                        "published":
+                            published
                     }
                 )
 
         except Exception as e:
 
             print(
-                f"Error reading feed "
-                f"{feed_info['name']}: {e}"
+                f"RSS Error: "
+                f"{feed_info['name']}"
             )
+
+            print(e)
 
     return all_news
 
 
 # =========================================================
-# حذف اخبار تکراری
+# REMOVE DUPLICATES
 # =========================================================
 
 def remove_duplicates(news):
 
-    seen = set()
     unique_news = []
+
+    seen_titles = set()
 
     for item in news:
 
-        key = item["title"].lower().strip()
+        title = (
+            item["title"]
+            .lower()
+            .strip()
+        )
 
-        if key in seen:
+        if title in seen_titles:
             continue
 
-        seen.add(key)
-        unique_news.append(item)
+        seen_titles.add(title)
+
+        unique_news.append(
+            item
+        )
 
     return unique_news
 
 
 # =========================================================
-# آماده‌سازی اخبار برای ChatGPT
+# PREPARE NEWS
 # =========================================================
 
-def build_news_text(news):
+def prepare_news(news):
 
     text = ""
 
-    for i, item in enumerate(news, start=1):
+    for index, item in enumerate(
+        news,
+        start=1
+    ):
 
         text += f"""
-خبر شماره {i}
+NEWS {index}
 
-عنوان:
+Title:
 {item['title']}
 
-منبع:
+Source:
 {item['source']}
 
-تاریخ انتشار:
+Published:
 {item['published']}
 
-لینک:
+URL:
 {item['link']}
 
------------------------------
+--------------------------------
 """
 
     return text
 
 
 # =========================================================
-# تولید گزارش با OpenAI
+# GEMINI REPORT
 # =========================================================
 
 def generate_report(news):
 
-    client = OpenAI(
-        api_key=OPENAI_API_KEY
+    print(
+        "Generating report with Gemini..."
     )
 
-    news_text = build_news_text(news)
+    client = genai.Client(
+        api_key=GEMINI_API_KEY
+    )
 
-    today = datetime.now(
+    news_text = prepare_news(
+        news
+    )
+
+    current_date = datetime.now(
         timezone.utc
-    ).strftime("%Y-%m-%d")
+    ).strftime(
+        "%Y-%m-%d"
+    )
 
     prompt = f"""
-تو یک تحلیلگر حرفه‌ای اخبار بین‌المللی هستی.
+تو یک تحلیلگر حرفه‌ای و بی‌طرف اخبار بین‌المللی هستی.
 
-برای تاریخ {today} یک گزارش روزانه فارسی درباره
-بحران و درگیری ایران و آمریکا تهیه کن.
+برای تاریخ {current_date} یک گزارش روزانه
+درباره بحران و درگیری ایران و آمریکا تهیه کن.
 
-اخبار خام زیر را بررسی کن:
+اطلاعات خام اخبار:
 
 {news_text}
 
-قوانین بسیار مهم:
+
+قوانین مهم:
 
 1. فقط بر اساس اخبار ارائه‌شده تحلیل کن.
-2. اگر یک ادعا توسط چند منبع تأیید نشده، آن را قطعی بیان نکن.
-3. اخبار تأییدشده را از ادعاها و گزارش‌های تأییدنشده جدا کن.
-4. از بیان اطلاعات ساختگی خودداری کن.
-5. لحن کاملاً بی‌طرفانه و خبری باشد.
-6. از تبلیغات سیاسی یا جانبداری خودداری کن.
-7. اگر اطلاعات کافی برای نتیجه‌گیری وجود ندارد، صریحاً بگو.
-8. اخبار تکراری را ادغام کن.
-9. مهم‌ترین خبرها را در اولویت قرار بده.
-10. گزارش باید برای ارسال در تلگرام مناسب باشد.
+
+2. اگر یک خبر فقط یک منبع دارد،
+آن را قطعی و تأییدشده معرفی نکن.
+
+3. اگر اخبار متناقض هستند،
+این موضوع را صریحاً اعلام کن.
+
+4. اخبار تأییدشده را از ادعاهای تأییدنشده جدا کن.
+
+5. اخبار تکراری را با هم ترکیب کن.
+
+6. هیچ اطلاعاتی را که در داده‌های ورودی وجود ندارد
+به‌عنوان واقعیت قطعی اضافه نکن.
+
+7. لحن کاملاً بی‌طرف و خبری باشد.
+
+8. از تبلیغات سیاسی و جانبداری خودداری کن.
+
+9. گزارش به زبان فارسی باشد.
+
+10. گزارش برای انتشار در Telegram آماده باشد.
+
 
 ساختار گزارش:
 
+
 📰 گزارش روزانه بحران ایران و آمریکا
 
-📅 تاریخ
+📅 تاریخ گزارش:
+{current_date}
+
 
 🔴 وضعیت کلی بحران
-یک خلاصه کوتاه از وضعیت فعلی
 
-🪖 ۱. مهم‌ترین تحولات نظامی
-حداکثر 5 مورد
+یک خلاصه بسیار کوتاه از وضعیت کلی.
 
-🕊️ ۲. تحولات دیپلماتیک
-مذاکرات، تهدیدها، میانجی‌گری‌ها
 
-🚢 ۳. تنگه هرمز و کشتیرانی
-اگر اطلاعاتی وجود دارد
+🪖 مهم‌ترین تحولات نظامی
 
-🛢️ ۴. نفت و اقتصاد
-تأثیر بحران بر نفت، انرژی و اقتصاد
+حداکثر 5 مورد.
 
-🌍 ۵. واکنش کشورهای جهان
-مهم‌ترین واکنش‌ها
 
-⚠️ ۶. اخبار تأییدنشده
-فقط اگر مورد مهمی وجود دارد
+🕊️ تحولات دیپلماتیک
 
-📊 ۷. ارزیابی روند بحران
-یکی از این سه گزینه را انتخاب کن:
+مذاکرات، تهدیدها،
+میانجی‌گری‌ها و مواضع رسمی.
+
+
+🚢 تنگه هرمز و کشتیرانی
+
+اگر اطلاعات معتبر وجود دارد.
+
+
+🛢️ نفت و اقتصاد
+
+تأثیر بحران بر نفت،
+انرژی و اقتصاد جهانی.
+
+
+🌍 واکنش کشورهای جهان
+
+مهم‌ترین واکنش‌های بین‌المللی.
+
+
+⚠️ اخبار تأییدنشده و ادعاها
+
+فقط موارد مهم.
+
+
+📊 ارزیابی روند بحران
+
+یکی را انتخاب کن:
 
 🔴 تشدید تنش
-🟡 وضعیت پایدار / نامشخص
+
+🟡 وضعیت پایدار یا نامشخص
+
 🟢 کاهش تنش
 
-دلیل انتخاب را کوتاه توضیح بده.
+سپس دلیل انتخاب را در 2 یا 3 جمله توضیح بده.
 
-🔮 ۸. چشم‌انداز 24 تا 72 ساعت آینده
-حداکثر 3 سناریوی محتمل
 
-⚠️ نکته:
-این گزارش صرفاً خلاصه و تحلیل اخبار موجود است
-و پیش‌بینی قطعی آینده نیست.
+🔮 چشم‌انداز 24 تا 72 ساعت آینده
 
-در انتها:
+حداکثر سه سناریوی محتمل.
 
-📌 منابع:
-نام منابع خبری استفاده‌شده را فهرست کن.
+
+⚠️ هشدار
+
+این گزارش خلاصه و تحلیل اخبار موجود است
+و پیش‌بینی قطعی آینده محسوب نمی‌شود.
+
+
+📌 منابع
+
+نام منابع استفاده‌شده را ذکر کن.
 """
 
-    response = client.responses.create(
-        model=OPENAI_MODEL,
-        input=prompt
-    )
+    try:
 
-    return response.output_text
+        response = client.models.generate_content(
+
+            model=GEMINI_MODEL,
+
+            contents=prompt
+
+        )
+
+        return response.text
+
+    except Exception as e:
+
+        print(
+            "Gemini API Error:"
+        )
+
+        print(e)
+
+        raise
 
 
 # =========================================================
-# ارسال پیام به تلگرام
+# TELEGRAM
 # =========================================================
 
-def send_telegram_message(message):
+def send_telegram_message(
+    message
+):
 
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    print(
+        "Sending report to Telegram..."
     )
 
-    # Telegram محدودیت طول پیام دارد.
+    telegram_url = (
+
+        "https://api.telegram.org/bot"
+
+        + TELEGRAM_BOT_TOKEN
+
+        + "/sendMessage"
+
+    )
+
+
+    # Telegram محدودیت طول پیام دارد
     max_length = 4000
 
+
     chunks = [
+
         message[i:i + max_length]
+
         for i in range(
+
             0,
+
             len(message),
+
             max_length
+
         )
+
     ]
+
 
     for chunk in chunks:
 
         payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": chunk,
+
+            "chat_id":
+                TELEGRAM_CHAT_ID,
+
+            "text":
+                chunk
+
         }
 
+
         response = requests.post(
-            url,
+
+            telegram_url,
+
             json=payload,
+
             timeout=30
+
         )
+
 
         if not response.ok:
 
             print(
-                "Telegram Error:",
+                "Telegram Error:"
+            )
+
+            print(
                 response.text
             )
 
             response.raise_for_status()
 
 
+        time.sleep(
+            1
+        )
+
+
 # =========================================================
-# اجرای اصلی
+# MAIN
 # =========================================================
 
 def main():
 
     print(
-        "Starting Iran-US Daily News Bot..."
+        "================================"
     )
+
+    print(
+        "Iran-US Daily News Bot"
+    )
+
+    print(
+        "================================"
+    )
+
+
+    # دریافت اخبار
 
     news = fetch_news()
 
-    print(
-        f"Collected {len(news)} news items."
-    )
-
-    news = remove_duplicates(
-        news
-    )
-
-    print(
-        f"After deduplication: "
-        f"{len(news)} items."
-    )
 
     if not news:
 
@@ -342,26 +498,69 @@ def main():
 
         return
 
-    # حداکثر 40 خبر برای کنترل هزینه و حجم ورودی
+
+    print(
+
+        f"Total news collected: "
+        f"{len(news)}"
+
+    )
+
+
+    # حذف تکراری‌ها
+
+    news = remove_duplicates(
+        news
+    )
+
+
+    print(
+
+        f"Unique news: "
+        f"{len(news)}"
+
+    )
+
+
+    # محدود کردن تعداد اخبار
+
     news = news[:40]
+
+
+    # تولید گزارش
 
     report = generate_report(
         news
     )
 
+
+    if not report:
+
+        print(
+            "Empty report."
+        )
+
+        return
+
+
     print(
         "Report generated."
     )
+
+
+    # ارسال به تلگرام
 
     send_telegram_message(
         report
     )
 
+
     print(
-        "Report sent successfully."
+        "Report sent successfully!"
     )
 
 
 if __name__ == "__main__":
 
     main()
+
